@@ -95,13 +95,10 @@ full experiment-by-experiment description, exact input fields used, and output f
 
 ## Full deliberation logs
 
-The complete deliberation logs for all 300 questions in both conditions (~460 MB: one
-`{json, jsonl, transcript.md}` triplet per question per condition) are not included directly in
-this repository. They will be hosted on Zenodo / a Hugging Face dataset and linked here before
-camera-ready. `deliberation_code_and_data/sample_outputs/` contains two example files (one per
-condition) so the schema can be inspected without downloading the full set.
-
-**[Zenodo / Hugging Face Datasets link — to be added]**
+The complete deliberation logs for all 300 questions in both conditions are not released.
+`deliberation_code_and_data/sample_outputs/` contains two example output files (one per
+condition) so the schema can be inspected, and the code in this repository reproduces the full
+logs from scratch given GPU access (see "Reproducing the paper's tables" above).
 
 ## Licenses
 
