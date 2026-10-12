@@ -40,7 +40,7 @@ algorithm — they are additional analyses, not part of the reported results.
 | 1 | Majority/minority bias at bandwagon revote (stage 1): how many agents flip toward the majority vs the minority after seeing raw vote counts |
 | 6 | Same-vote vs cross-vote targeting in debate (A-pings-A, B-pings-B, cross-pings) with normalized counts, plus two filtered variants (one requiring >=2 persistent voters per side, one requiring >=3 per side in every round) |
 | 9 | Majority/minority rational bias at reasoned conformity revote (stage 3): flips after seeing rationales |
-| 10 | Back-to-own-rational reversion: agents who flipped at stage 1 (bandwagon) returning to their original baseline vote at stage 3 (after rationales), vs flipping to a third position |
+| 10 | Back-to-own-rational reversion: among agents whose vote differs between stage 1 (bandwagon) and stage 3 (after rationales), how many land back on their original Round 0 vote vs a third position |
 | 11 | Back-to-own-rational split by whether the agent reverted to the majority or minority side |
 | 12 | Communication distance: pings (unreciprocated statements) vs talks (reciprocated exchanges) binned by the vote-agreement distance between speaker and target across debate rounds, plus a filtered variant |
 
@@ -56,7 +56,7 @@ algorithm — they are additional analyses, not part of the reported results.
 | 7 | Family-to-family targeting matrix: counts of speaker-family to target-family pings across all 11 debate rounds, raw and normalized by group-pair size |
 | 8 | Rich-to-rich, rich-to-poor, poor-to-rich, poor-to-poor targeting: same logic as experiment 7 but grouped by parameter-size tier instead of family |
 | 9 | Majority/minority rational bias at reasoned conformity revote (stage 3) |
-| 10 | Back-to-own-rational reversion + a second pass attributing minority flips at stage 3 to family majority vs rich-model majority |
+| 10 | Back-to-own-rational reversion (same definition as above) + a second pass attributing minority flips at stage 3 to family majority vs rich-model majority |
 | 11 | Back-to-own-rational split by majority vs minority |
 | 12 | Communication distance analysis with a filtered variant |
 
