@@ -11,25 +11,39 @@ Simulation code and sample outputs for a structured deliberation experiment amon
 
 Everything else (questions, agent roster, prompt templates, decoding parameters, debate structure) is identical across conditions.
 
+Note: `identities.py` and `run_experiment.py` support several additional identity conditions
+(virtual personas, family-only reveal, size-only reveal, gender reveal, delayed reveal, and
+others) used for earlier exploratory work. **Only `anonymous` and `real_full_identity` are run
+and reported in the paper.**
+
 ## Agent roster
 
-Eleven open-weight models spanning four families and a range of parameter sizes, served via vLLM:
+Eleven open-weight models spanning four families and a range of parameter sizes. The table below
+lists the identity string agents actually see in the `real_full_identity` condition, the exact
+checkpoint served by `launch_servers.sh` (not the unquantized base checkpoint, where different),
+and its serving weight format. In the `anonymous` condition only the bare `Agent_NN` id is shown.
 
-| Agent | Family | Size | HuggingFace checkpoint |
-|---|---|---|---|
-| Agent_01 | Qwen | 3B | `Qwen/Qwen2.5-3B-Instruct` |
-| Agent_02 | Qwen | 8B | `Qwen/Qwen2.5-7B-Instruct` |
-| Agent_03 | Qwen | 32B | `Qwen/Qwen2.5-32B-Instruct` |
-| Agent_04 | Gemma | 1B | `google/gemma-3-1b-it` |
-| Agent_07 | Gemma | 12B | `google/gemma-3-12b-it` |
-| Agent_08 | Gemma | 4B | `google/gemma-3-4b-it` |
-| Agent_05 | LLaMA | 8B | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
-| Agent_06 | LLaMA | 70B | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
-| Agent_11 | LLaMA | 3B | `meta-llama/Llama-3.2-3B-Instruct` |
-| Agent_09 | Mistral | 3B | `mistralai/Ministral-3-3B-Instruct-2512` |
-| Agent_10 | Mistral | 8B | `mistralai/Mistral-7B-Instruct-v0.3` |
+| Agent | Identity string shown | Served checkpoint (vLLM) | Weights | Club |
+|---|---|---|---|---|
+| Agent_01 | `Agent_01 [Qwen 2.5 3B]` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | AWQ 4-bit | Poor |
+| Agent_02 | `Agent_02 [Qwen 2.5 7B]` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | AWQ 4-bit | Poor |
+| Agent_03 | `Agent_03 [Qwen 2.5 32B]` | `Qwen/Qwen2.5-32B-Instruct-AWQ` | AWQ 4-bit | Rich |
+| Agent_04 | `Agent_04 [Gemma 3 1B]` | `google/gemma-3-1b-it` | BF16 | Poor |
+| Agent_05 | `Agent_05 [LLaMA 3.1 8B]` | `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4` | AWQ 4-bit | Poor |
+| Agent_06 | `Agent_06 [LLaMA 3.1 70B]` | `hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4` | AWQ 4-bit | Rich |
+| Agent_07 | `Agent_07 [Gemma 3 12B]` | `gaunernst/gemma-3-12b-it-int4-awq` | AWQ 4-bit | Rich |
+| Agent_08 | `Agent_08 [Gemma 3 4B]` | `google/gemma-3-4b-it` | FP8 | Poor |
+| Agent_09 | `Agent_09 [Ministral 3 3B]` | `mistralai/Ministral-3-3B-Instruct-2512` | BF16 | Poor |
+| Agent_10 | `Agent_10 [Mistral 7B v0.3]` | `solidrust/Mistral-7B-Instruct-v0.3-AWQ` | AWQ 4-bit | Poor |
+| Agent_11 | `Agent_11 [LLaMA 3.2 3B]` | `casperhansen/llama-3.2-3b-instruct-awq` | AWQ 4-bit | Poor |
 
-Family balance: Qwen 3, Gemma 3, LLaMA 3, Mistral 2.
+Family balance: Qwen 3, Gemma 3, LLaMA 3, Mistral 2. Rich club (>10B parameters): Agents 03, 06, 07
+(3 agents). Poor club (the remaining eight): Agents 01, 02, 04, 05, 08, 09, 10, 11.
+
+Note: Agents 02 and 10 are genuine 7B-parameter checkpoints. An unrelated internal metadata field
+(`size_str`, used only for the rich/poor club split, where the >10B cutoff places both firmly in
+the poor club either way) labels them `"8B"` — this does not reflect a different model being served,
+and does not affect the rich/poor classification above.
 
 ## Deliberation protocol
 
@@ -55,7 +69,12 @@ All agents use temperature 0 (greedy decoding). If a response cannot be parsed, 
 | MoralChoice | `ninoscherrer/moralchoice` | 100 | 50 low-ambiguity + 50 high-ambiguity |
 | Moral Machine | `Jerry999/MoralMachineHuman` | 100 | Stratified sample |
 
-Each question is normalized to a binary (Option A / Option B) format. The exact question set is fixed across conditions via `make_fixed_question_set.py`.
+Each question is normalized to a binary (Option A / Option B) format. The exact 300-question set
+used for the reported runs is included as `fixed_question_set.json` in this folder — point
+`run_experiment.py`/`run_full_experiment.py` at it (see Steps below) to reproduce the paper's
+questions exactly, rather than regenerating a fresh sample via `make_fixed_question_set.py`
+(which `dataset_loaders.py` seeds deterministically, but a fresh run is provided here for
+convenience and as the ground truth regardless).
 
 ## Code structure
 
@@ -82,7 +101,7 @@ sample_outputs/
 ### Prerequisites
 
 - Python 3.10+
-- Two GPUs with 80+ GB VRAM each (for vLLM serving of all 11 models)
+- Two GPUs with ~98 GB VRAM each (the reported runs used 2x NVIDIA RTX PRO 6000 Blackwell; 80+ GB per GPU is the practical minimum for serving all 11 models at `--max-model-len 32768`)
 - `pip install -r code/requirements.txt`
 
 ### Steps

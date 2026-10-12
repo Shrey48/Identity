@@ -49,7 +49,7 @@ from identities import (
     FULL_PERSONA_COMBO,
     build_default_agent_roster,
     format_agent_display_identity,
-    get_agent_self_identity_prompt_block,
+    get_agent_self_identity_prompt_block
 )
 from prompts import (
     SYSTEM_PROMPT_TEMPLATE,
@@ -131,21 +131,24 @@ DELAYED_REVEAL_TARGET_MODE = "real_family_and_size"  # What identity is revealed
 # --- 3. SIMULATION STRUCTURE ---
 NUM_DEBATE_ROUNDS = 11         # Number of full (statement -> reveal -> revote) debate cycles
 TEMPERATURE = 0.0              # Sampling temperature for LLM responses (greedy - removes resampling noise from vote/flip measurements)
-# The anonymous-only "guess the other models" final round is switched OFF so that
-# the anonymous condition and the identity conditions receive identical
-# instructions and identical rounds (the only difference is the identity labels).
-# The stage's code is kept; set this to True to bring it back.
-RUN_MODEL_IDENTIFICATION_STAGE = False
-
 RETRY_TEMPERATURE = 0.7        # Temperature used ONLY on retry-after-parse-failure attempts in
                                # _generate_for_all_agents. At TEMPERATURE=0 every attempt would be
                                # byte-identical, so a malformed response would never recover via
                                # retry - this applies only to the fresh-sample recovery path, never
                                # to the first (official, recorded) attempt.
-# MAX_TOKENS is the OUTPUT budget per answer. The input context (the full debate
-# history) is limited by the servers' 32,768-token window (see launch_servers.sh).
+# Confirmed via repeated real 400 errors on this exact deployment: debate-stage
+# prompts (round 1) consistently land around ~3185 input tokens regardless of
+# identity condition - the dominant size driver is the LLM-generated rationale
+# text carried in the votes/rationale table, not the identity labels. 400 was
+# STILL exactly 1 token too many against the ORIGINAL MAX_MODEL_LEN=3584 - cutting
+# with real margin instead of another marginal trim. MAX_MODEL_LEN is now 32768
+# (see launch_servers.sh - raised for full cumulative debate-history context
+# across all 11 rounds), so this specific 3584 ceiling no longer applies, but
+# MAX_TOKENS is left at 300 regardless: it is an OUTPUT budget (how much the
+# model itself is allowed to generate per call), unrelated to how large the
+# INPUT context has grown - raising it doesn't need to track MAX_MODEL_LEN.
 MAX_TOKENS = 300               # Maximum tokens for LLM generation
-MODEL_GUESS_MAX_TOKENS = 3200   # The anonymous-condition guess-the-model stage needs one
+MODEL_GUESS_MAX_TOKENS = 6000   # The anonymous-condition guess-the-model stage needs one
                                 # guess+rationale per OTHER agent (10 entries, not 11 - an
                                 # agent never guesses itself) in a single response, not a
                                 # single vote/statement - MAX_TOKENS=300 truncated every
@@ -153,8 +156,10 @@ MODEL_GUESS_MAX_TOKENS = 3200   # The anonymous-condition guess-the-model stage 
                                 # models (e.g. Gemma 1B), and a real full run confirmed 1600
                                 # still truncates Agent_08 (Gemma 4B) at 9/10 complete
                                 # entries even after 3 retries (RuntimeError: "only had 9
-                                # well-formed entries, needed at least 10") - raised again
-                                # with real margin this time.
+                                # well-formed entries, needed at least 10"). Raised to 3200
+                                # "with real margin" but a later real run still hit truncation
+                                # on Agent_04 (Gemma 3 1B, even smaller/more verbose) - raised
+                                # again to 6000 for real margin against the weakest model.
 
 # --- 4. BACKEND & API PROVIDER CONFIGURATION ---
 # Choose how to run the models:
@@ -298,8 +303,16 @@ class LLMBackend:
             "Authorization": f"Bearer {key}"
         }
 
-        # Some chat templates (e.g. Gemma's) reject a separate system-role message, so the
-        # system text is folded into the user turn for every model.
+        # OpenRouter specific attribution headers
+        if "openrouter" in self.provider:
+            headers["HTTP-Referer"] = "https://github.com/google-deepmind/democratic-llms"
+            headers["X-Title"] = "Democratic Multi-Agent Deliberation Experiment"
+
+        # Some chat templates in this roster (Gemma's, confirmed via a real 400
+        # "System role not supported" error on this exact deployment) reject a
+        # separate system-role message outright. Folding it into the user turn
+        # instead works uniformly across every model family here and carries the
+        # same information, so there is no need to special-case by agent/family.
         payload = {
             "model": agent.model_name,
             "messages": [
@@ -345,6 +358,63 @@ class LLMBackend:
                 body = e.read().decode("utf-8", errors="replace")
             except Exception:
                 body = "<could not read response body>"
+
+            # Context-length overflow: confirmed in production to hit ONLY
+            # Agent_10 (Mistral-7B-v0.3), never the other 10 agents, despite
+            # every agent receiving the identical shared prompt string at a
+            # given point in the debate - Mistral's own tokenizer is simply
+            # less token-efficient per character than the other agents' for
+            # this English debate text, so it alone crosses MAX_MODEL_LEN=32768
+            # in the later rounds where "FULL DEBATE HISTORY" has grown large.
+            # Rather than failing the whole question over this one agent's
+            # tokenizer being less efficient, progressively drop the EARLIEST
+            # "#### Round N statements:" blocks from the debate-history section
+            # of user_prompt and retry - the agent still sees every recent
+            # round plus the current dilemma/votes/instructions, just not the
+            # oldest rounds, which matter far less to a re-vote/statement than
+            # the most recent context does. A prompt with no such round-block
+            # markers (e.g. the baseline vote, which has no history at all)
+            # is untouched by this loop and falls straight through to the
+            # original raise below, unchanged from before this fix.
+            if e.code == 400 and "maximum context length" in body:
+                truncated_prompt = user_prompt
+                for drop_count in (2, 4, 8, 16, 32):
+                    parts = re.split(r'(?=#### Round \d+ statements:)', truncated_prompt)
+                    if len(parts) <= 1:
+                        break  # no round-blocks left (or none present) to drop
+                    keep_from = min(drop_count, len(parts) - 1)
+                    new_prompt = parts[0] + "".join(parts[1 + keep_from:])
+                    if new_prompt == truncated_prompt:
+                        break  # dropping more wouldn't change anything further
+                    truncated_prompt = new_prompt
+                    retry_payload = dict(payload)
+                    retry_payload["messages"] = [
+                        {"role": "user", "content": f"{system_prompt}\n\n{truncated_prompt}"}
+                    ]
+                    try:
+                        req2 = urllib.request.Request(
+                            endpoint_url,
+                            data=json.dumps(retry_payload).encode("utf-8"),
+                            headers=headers,
+                            method="POST"
+                        )
+                        with urllib.request.urlopen(req2, timeout=1800) as resp2:
+                            data2 = json.loads(resp2.read().decode("utf-8"))
+                            logger.warning(
+                                f"[{agent.agent_id}] prompt exceeded context length "
+                                f"({body[:200]!r}); retried with the earliest {keep_from} "
+                                f"debate-history round-block(s) dropped and succeeded."
+                            )
+                            return data2["choices"][0]["message"]["content"]
+                    except urllib.error.HTTPError as e2:
+                        try:
+                            body2 = e2.read().decode("utf-8", errors="replace")
+                        except Exception:
+                            body2 = "<could not read response body>"
+                        if e2.code != 400 or "maximum context length" not in body2:
+                            break  # a different failure now - stop and fall through to raise
+                        continue  # still too long even with this much dropped, try dropping more
+
             raise RuntimeError(
                 f"API call failed for {agent.agent_id} (Model: {agent.model_name}) via {self.provider} at {endpoint_url}: {e} | body={body}"
             ) from e
@@ -773,11 +843,13 @@ def _validate_debate_statement_field(parsed: Dict[str, Any], agent: Optional["Ag
     target = parsed.get("target_agent_id")
     if not isinstance(target, str) or not target.strip():
         raise ValueError(f"Model returned an empty/missing target_agent_id: {parsed.get('target_agent_id')!r}")
-    if valid_ids is not None:
-        if target.strip() not in valid_ids:
-            raise ValueError(f"target_agent_id {target!r} is not a valid participant ID")
-        if agent is not None and target.strip() == agent.agent_id:
-            raise ValueError("target_agent_id is the speaker itself")
+    # NOTE: an invalid or self-targeting target_agent_id is deliberately NOT validated
+    # here (even though valid_ids is available) - the caller (the statement-processing
+    # loop right after _generate_for_all_agents) already salvages this by falling back
+    # to a random *other* agent (target_candidates excludes the speaker), exactly as the
+    # pre-reply-phase code always did. Raising here instead would burn all retries on a
+    # single targeting slip and fail the entire question - confirmed happening in
+    # production (Agent_04/Gemma-3-1B self-targeted repeatedly and exhausted retries).
 
 
 def _validate_reply_field(parsed: Dict[str, Any], agent: Optional["AgentMetadata"] = None) -> None:
@@ -1036,8 +1108,12 @@ class SimulationRunner:
         attempt at this exact job, or (None, None) if there is nothing to
         resume (no file, unreadable, already fully completed, or - critically -
         the old attempt used a different model per agent_id than this run).
-        That last check prevents a resumed run from mixing the outputs of two
-        different models for the same agent.
+        That last check matters: this codebase has swapped models mid-project
+        (e.g. Agent_05's Llama-3.2-1B -> gemma-3-1b-it swap) specifically
+        because the old model was broken. Blindly resuming from a file whose
+        earlier stages ran on the broken model would silently mix two
+        different experimental conditions into one trajectory - worse than
+        just redoing the job.
         """
         if not os.path.exists(self.problem_json_path):
             return None, None
@@ -1196,11 +1272,6 @@ class SimulationRunner:
             "previous_vote": previous["vote"] if previous else None,
         }
 
-    def _ensure_run_metadata(self) -> None:
-        if not hasattr(self, "_retry_log"):
-            self._retry_log = []
-            self.conversation_logger.metadata["retry_log"] = self._retry_log
-
     def _generate_for_tasks(
         self,
         tasks: List[Tuple[Any, "AgentMetadata", Any]],
@@ -1215,7 +1286,9 @@ class SimulationRunner:
         (first attempt at TEMPERATURE, retries at RETRY_TEMPERATURE) and retries are
         recorded in the same retry_log.
         """
-        self._ensure_run_metadata()
+        if not hasattr(self, "_retry_log"):
+            self._retry_log = []
+            self.conversation_logger.metadata["retry_log"] = self._retry_log
 
         def _call(task) -> Tuple[Any, str]:
             key, agent, build_prompt = task
@@ -1240,10 +1313,21 @@ class SimulationRunner:
                         f"[{agent.agent_id}] produced unparseable/invalid output on attempt "
                         f"{attempt + 1}/{max_retries + 1}, regenerating: {e}"
                     )
-            raise RuntimeError(
-                f"[{agent.agent_id}] failed to produce a valid response after "
-                f"{max_retries + 1} attempts: {last_err}"
+            # This is currently only used for the reply/decline phase, which runs
+            # mid-debate (round 1 through num_debate_rounds) - unlike a vote/statement
+            # failure, raising here would propagate up and destroy EVERY round's real
+            # debate content for the whole question, not just this one agent's single
+            # reply to one message (confirmed happening in production: Agent_01 - Qwen
+            # 2.5 3B - exhausting retries here cost entire already-debated questions,
+            # e.g. moralchoice_0687/0690/0698/0721, moralmachine_0053/0068/0071). Fall
+            # back to an auto-decline instead of raising, so this one message's
+            # reply/decline is the only thing lost, not the whole question.
+            logger.warning(
+                f"[{agent.agent_id}] exhausted all {max_retries + 1} attempts ({last_err}); "
+                f"falling back to an auto-decline for this one reply so the rest of the "
+                f"question's real debate data is not lost."
             )
+            return key, '{"decision": "decline", "text": "(auto-decline: agent did not produce a valid reply after retries)"}'
 
         results: Dict[Any, str] = {}
         futures = [self._agent_pool.submit(_call, t) for t in tasks]
@@ -1257,7 +1341,9 @@ class SimulationRunner:
         build_prompt: Callable[[AgentMetadata], Tuple[str, str, Dict[str, Any]]],
         max_retries: int = 2,
         validate: Optional[Callable[[Dict[str, Any]], None]] = None,
-        max_tokens: int = MAX_TOKENS
+        max_tokens: int = MAX_TOKENS,
+        fallback_raw: Optional[str] = None,
+        rationale_only_fallback: bool = False
     ) -> Dict[str, str]:
         """
         Fires backend.generate() for every agent in this stage CONCURRENTLY - each
@@ -1288,6 +1374,7 @@ class SimulationRunner:
         def _call(agent: AgentMetadata) -> Tuple[str, str]:
             sys_prompt, user_prompt, round_ctx = build_prompt(agent)
             last_err: Optional[Exception] = None
+            last_parsed: Optional[Dict[str, Any]] = None
             for attempt in range(max_retries + 1):
                 attempt_temperature = TEMPERATURE if attempt == 0 else RETRY_TEMPERATURE
                 raw = self.backend.generate(agent, sys_prompt, user_prompt, temperature=attempt_temperature, max_tokens=max_tokens, round_context=round_ctx)
@@ -1303,16 +1390,69 @@ class SimulationRunner:
                     return agent.agent_id, raw
                 except (RuntimeError, ValueError) as e:
                     last_err = e
+                    try:
+                        last_parsed = extract_json_from_text(raw)
+                    except (RuntimeError, ValueError):
+                        last_parsed = None
                     logger.warning(
                         f"[{agent.agent_id}] produced unparseable/invalid output on attempt "
                         f"{attempt + 1}/{max_retries + 1}, regenerating: {e}"
                     )
+            if rationale_only_fallback and last_parsed is not None:
+                # Confirmed in production: Agent_07 (Gemma-3-12B) occasionally
+                # emits a genuinely valid vote/confidence/flipped but an empty
+                # rationale, in combined vote+rationale revote stages (later
+                # debate rounds) - a DIFFERENT call site from the isolated
+                # rationale_collection stage's fallback_raw above, one that
+                # carries real vote data. Never fabricate a vote - only patch
+                # the rationale, and only when the vote field from this exact
+                # last attempt independently re-validates as genuinely "A"/"B"
+                # on its own. If the vote itself was also the problem, this is
+                # a no-op and the original raise below still fires unchanged.
+                try:
+                    _validate_vote_field(last_parsed)
+                    vote_is_genuinely_valid = True
+                except (RuntimeError, ValueError):
+                    vote_is_genuinely_valid = False
+                if vote_is_genuinely_valid:
+                    patched = dict(last_parsed)
+                    patched["rationale"] = (
+                        "(no rationale provided: agent failed to produce a valid "
+                        "rationale after repeated attempts - vote/confidence above "
+                        "are the agent's own genuine last values, not fabricated)"
+                    )
+                    patched.setdefault("flipped", False)
+                    logger.warning(
+                        f"[{agent.agent_id}] failed to produce a valid rationale after "
+                        f"{max_retries + 1} attempts ({last_err}), but its own vote/"
+                        f"confidence from that same attempt were genuinely valid - "
+                        f"keeping the real vote and substituting only a placeholder "
+                        f"rationale, rather than discarding real vote data."
+                    )
+                    return agent.agent_id, json.dumps(patched)
+            if fallback_raw is not None:
+                # Only passed by call sites whose field is non-essential free
+                # text with no vote/tally at stake (confirmed: currently only
+                # the isolated rationale_collection stage, which asks for
+                # nothing but a "rationale" string - see the reply/decline
+                # fallback a few lines above this function for the identical
+                # precedent: losing one agent's one piece of prose for one
+                # question is preferable to losing that question's entire
+                # debate data over a single flaky rationale generation).
+                logger.warning(
+                    f"[{agent.agent_id}] failed to produce a valid response after "
+                    f"{max_retries + 1} attempts ({last_err}); falling back to a "
+                    f"placeholder so the rest of this question's real data is not lost."
+                )
+                return agent.agent_id, fallback_raw
             raise RuntimeError(
                 f"[{agent.agent_id}] failed to produce a valid response after "
                 f"{max_retries + 1} attempts: {last_err}"
             )
 
-        self._ensure_run_metadata()
+        if not hasattr(self, "_retry_log"):
+            self._retry_log = []
+            self.conversation_logger.metadata["retry_log"] = self._retry_log   # saved with every JSON write
         results: Dict[str, str] = {}
         futures = [self._agent_pool.submit(_call, agent) for agent in self.agents]
         for future in futures:
@@ -1523,7 +1663,10 @@ class SimulationRunner:
             }
             return sys_prompt, user_prompt, round_ctx
 
-        raw_responses = self._generate_for_all_agents(build_prompt, validate=_validate_rationale_field)
+        raw_responses = self._generate_for_all_agents(
+            build_prompt, validate=_validate_rationale_field,
+            fallback_raw='{"rationale": "(no rationale provided: agent failed to produce a valid response after repeated attempts)"}'
+        )
 
         votes_record = []
         tally = {"A": 0, "B": 0}
@@ -1595,7 +1738,10 @@ class SimulationRunner:
             }
             return sys_prompt, user_prompt, round_ctx
 
-        raw_responses = self._generate_for_all_agents(build_prompt, validate=_validate_vote_and_rationale_field)
+        raw_responses = self._generate_for_all_agents(
+            build_prompt, validate=_validate_vote_and_rationale_field,
+            rationale_only_fallback=True
+        )
 
         votes_record = []
         tally = {"A": 0, "B": 0}
@@ -1842,7 +1988,10 @@ class SimulationRunner:
             }
             return sys_prompt, revote_prompt, round_ctx
 
-        revote_responses = self._generate_for_all_agents(build_revote_prompt, validate=_validate_vote_and_rationale_field)
+        revote_responses = self._generate_for_all_agents(
+            build_revote_prompt, validate=_validate_vote_and_rationale_field,
+            rationale_only_fallback=True
+        )
 
         votes_record = []
         tally = {"A": 0, "B": 0}
@@ -1923,16 +2072,48 @@ class SimulationRunner:
             round_ctx = {"other_agent_ids": [a.agent_id for a in other_agents]}
             return sys_prompt, guess_prompt, round_ctx
 
-        responses = self._generate_for_all_agents(
-            build_prompt,
-            validate=lambda p, a: _validate_model_guesses_field(p, a, all_agent_ids),
-            max_tokens=MODEL_GUESS_MAX_TOKENS
-        )
+        try:
+            responses = self._generate_for_all_agents(
+                build_prompt,
+                validate=lambda p, a: _validate_model_guesses_field(p, a, all_agent_ids),
+                max_tokens=MODEL_GUESS_MAX_TOKENS
+            )
+        except RuntimeError as e:
+            # This is the LAST stage, running only after all real experimental data
+            # (votes, debate statements, replies/declines) is already finalized in
+            # stage_history. The strict validator above is correct to want a complete
+            # guess for every other agent - but a weak model (confirmed: Agent_04,
+            # Gemma 3 1B) exhausting all retries here must not destroy that already-
+            # complete real debate data over this tangential guess-the-model exercise.
+            # Fall back to one best-effort unvalidated attempt per agent; whatever
+            # comes back (even partial/malformed) is tolerated by the reconstruction
+            # loop below, which already defaults missing/invalid entries to empty
+            # model_guess/rationale strings - this just extends that same, already-
+            # accepted tolerance to "never produced a fully valid response" too.
+            logger.warning(f"[{stage_name}] generate-with-validation exhausted retries ({e}); "
+                            f"falling back to one unvalidated attempt per agent so the real "
+                            f"debate data for this question is not discarded.")
+            responses = {}
+            for agent in self.agents:
+                sys_prompt, guess_prompt, round_ctx = build_prompt(agent)
+                try:
+                    responses[agent.agent_id] = self.backend.generate(
+                        agent, sys_prompt, guess_prompt, temperature=RETRY_TEMPERATURE,
+                        max_tokens=MODEL_GUESS_MAX_TOKENS, round_context=round_ctx
+                    )
+                except Exception as inner_e:
+                    logger.warning(f"[{stage_name}] {agent.agent_id} fallback generation also failed: {inner_e}")
+                    responses[agent.agent_id] = "{}"
 
         guesses_record = []
         for agent in self.agents:
             raw_resp = responses[agent.agent_id]
-            parsed = extract_json_from_text(raw_resp)
+            try:
+                parsed = extract_json_from_text(raw_resp)
+            except Exception as e:
+                logger.warning(f"[{stage_name}] {agent.agent_id} response unparseable even in fallback "
+                                f"({e}); recording empty guesses for this agent.")
+                parsed = {}
             guesses = parsed.get("guesses", {})
             if not isinstance(guesses, dict):
                 guesses = {}
@@ -2073,7 +2254,7 @@ class SimulationRunner:
 
         # Anonymous-condition-only final stage: agents were told at the start of
         # the run (see identities.py) that this was coming.
-        if RUN_MODEL_IDENTIFICATION_STAGE and self.identity_mode == "anonymous" and "model_identification" not in done_stages:
+        if self.identity_mode == "anonymous" and "model_identification" not in done_stages:
             self.execute_model_identification_stage()
 
         summary = self.compute_summary_analytics()

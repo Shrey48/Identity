@@ -259,16 +259,24 @@ def load_mmlu_dataset(
                         choices = row.get("choices", [])
                         ans_idx = row.get("answer", 0)
                         
-                        # Reduce each four-option question to two options: the correct answer and
-                        # the first incorrect option. The position of the correct answer is
-                        # randomised (seeded per question) so agents get no positional cue.
+                        # Convert to binary dilemma: True Answer vs Top Alternative distractor.
+                        # BUG FIXED: this used to compute correct_choice/distractor_choice
+                        # then throw them away and always emit choices[0] vs choices[1]
+                        # regardless of where the real answer actually was - confirmed live
+                        # that for any question whose correct answer was at index 2 or 3
+                        # (roughly half of all 4-choice MMLU questions), models were shown
+                        # two objectively WRONG options with the real answer never
+                        # presented at all, while ground_truth silently recorded None as if
+                        # that were an intentional "can't score this one" case rather than
+                        # a bug. Now always pairs the real correct answer against one
+                        # distractor, with the position randomized (not always "A") so the
+                        # experiment doesn't hand agents a free positional heuristic.
                         if len(choices) >= 2 and 0 <= ans_idx < len(choices):
                             correct_choice = choices[ans_idx]
                             distractor_idx = 0 if ans_idx != 0 else 1
                             distractor_choice = choices[distractor_idx]
 
-                            # Seeded per question, so the A/B order is reproducible.
-                            if random.Random(f"mmlu|{subj}|{subject_item_count}").random() < 0.5:
+                            if random.random() < 0.5:
                                 opt_a, opt_b, gt = correct_choice, distractor_choice, "A"
                             else:
                                 opt_a, opt_b, gt = distractor_choice, correct_choice, "B"

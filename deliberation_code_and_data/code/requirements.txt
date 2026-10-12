@@ -1,12 +1,17 @@
-# Experiment
+# Experiment (deliberation runs)
 datasets
 huggingface_hub
-vllm            # model servers (see launch_servers.sh)
+vllm            # model servers (see launch_servers.sh). Exact version used for the
+                # reported runs was not recorded; install the latest release
+                # compatible with your CUDA/GPU setup.
 
-# Analysis
+# Analysis (notebooks in ../analysis/)
+jupyter
 pandas
 numpy
 scipy
 statsmodels
+openpyxl        # required by pandas.ExcelWriter(engine="openpyxl") and `import openpyxl`
 xlsxwriter
 matplotlib
+jsonpath-ng

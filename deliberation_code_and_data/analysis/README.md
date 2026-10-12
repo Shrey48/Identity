@@ -2,6 +2,27 @@
 
 Three Jupyter notebooks that compute 12 experiments from the deliberation simulation output JSONs. Each experiment analyzes a specific aspect of agent voting behavior, social influence, and communication patterns across the anonymous and identity conditions.
 
+**Not every experiment here is reported in the paper.** Experiment 12 (communication-distance
+analysis) and the second pass of Experiment 10 (in `run_experiments_identity.ipynb`) are
+additional analyses that were run but are not part of the published results. The table below maps
+every paper section and algorithm to the exact notebook and experiment number that produced it.
+
+## Paper-to-notebook mapping
+
+| Paper section | Algorithm(s) | Notebook experiment(s) |
+|---|---|---|
+| §4.1 | 1 | Exp 1 |
+| §4.2 | 2 | Exp 3 |
+| §4.3 | 3, 4 | Exp 2, Exp 4 |
+| §4.4 | 5 | Exp 9 |
+| §4.5 | 6 | Exp 10 (first pass) |
+| §4.6 | 7 | Exp 11 |
+| §4.7 | 8 | Exp 5 |
+| §4.8 | 9, 10, 11 | Exp 6, Exp 7, Exp 8 |
+
+Experiment 12 and Experiment 10's second pass are not referenced by any paper section or
+algorithm — they are additional analyses, not part of the reported results.
+
 ## Notebooks
 
 | Notebook | Condition | Run from |
@@ -29,8 +50,8 @@ Three Jupyter notebooks that compute 12 experiments from the deliberation simula
 |---|---|
 | 1 | Majority/minority bias at bandwagon revote (stage 1) |
 | 2 | Within-family majority/minority bias: whether agents flip toward the majority within their own model family (Qwen, Gemma, LLaMA, Mistral) |
-| 3 | Minority-flip attribution: among agents that flip to the global minority at stage 1, how many are explained by their family's internal majority vs the rich-model subgroup's majority vs neither (exceptional) |
-| 4 | Rich-model majority vs poor-model majority: whether flips at stage 1 align with the majority among large (>=10B) or small (<10B) models |
+| 3 | Minority-flip attribution: among agents that flip to the global minority at stage 1, how many are explained by their family's internal majority vs the rich club's majority specifically (always compared against the rich club, not the agent's own size group) vs neither (exceptional) |
+| 4 | Rich club majority vs poor club majority: whether flips at stage 1 align with the majority among large (>10B) or small (the remaining eight) models |
 | 6 | Same-vote vs cross-vote targeting in debate, with two filtered variants (same as anonymous) |
 | 7 | Family-to-family targeting matrix: counts of speaker-family to target-family pings across all 11 debate rounds, raw and normalized by group-pair size |
 | 8 | Rich-to-rich, rich-to-poor, poor-to-rich, poor-to-poor targeting: same logic as experiment 7 but grouped by parameter-size tier instead of family |
@@ -110,8 +131,6 @@ The notebooks read the following fields from the deliberation output JSONs (see 
 
 ## Dependencies
 
-```
-pandas
-openpyxl
-jsonpath-ng
-```
+See `../code/requirements.txt` (the "Analysis" section) for the full, pinned dependency list —
+`jupyter`, `pandas`, `numpy`, `scipy`, `statsmodels`, `openpyxl`, `xlsxwriter`, `matplotlib`, and
+`jsonpath-ng`.

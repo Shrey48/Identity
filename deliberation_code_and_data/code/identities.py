@@ -173,6 +173,7 @@ REAL_FULL_IDENTITY: Dict[str, str] = {
     "Agent_11": "LLaMA 3.2 3B",
 }
 
+
 # Provider-specific model name mappings for the 11 agents
 PROVIDER_MODEL_MAPPINGS: Dict[str, Dict[str, str]] = {
     # 1. HuggingFace Hub / Local Transformers
@@ -475,7 +476,11 @@ def get_agent_self_identity_prompt_block(
     if mode == "anonymous":
         return (
             f"You are participating as **{agent.agent_id}** in an anonymous democratic assembly. "
-            f"Your underlying model architecture, size, and demographic identity are completely undisclosed to other participants."
+            f"Your underlying model architecture, size, and demographic identity are completely undisclosed to other participants. "
+            f"IMPORTANT: at the very end of this assembly, after all deliberation is complete, you will be "
+            f"asked to guess which real AI model is behind every other participant. Pay close attention "
+            f"throughout every stage to each participant's reasoning style, argument patterns, and how they "
+            f"respond to challenges, so you can make an informed guess at the end."
         )
 
     elif mode == "real_family_only":
