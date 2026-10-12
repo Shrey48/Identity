@@ -1,0 +1,12 @@
+# Experiment
+datasets
+huggingface_hub
+vllm            # model servers (see launch_servers.sh)
+
+# Analysis
+pandas
+numpy
+scipy
+statsmodels
+xlsxwriter
+matplotlib
