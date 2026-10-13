@@ -33,7 +33,7 @@ and its serving weight format. In the `anonymous` condition only the bare `Agent
 | Agent_06 | `Agent_06 [LLaMA 3.1 70B]` | `hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4` | AWQ 4-bit | Rich |
 | Agent_07 | `Agent_07 [Gemma 3 12B]` | `gaunernst/gemma-3-12b-it-int4-awq` | AWQ 4-bit | Rich |
 | Agent_08 | `Agent_08 [Gemma 3 4B]` | `google/gemma-3-4b-it` | FP8 | Poor |
-| Agent_09 | `Agent_09 [Ministral 3 3B]` | `mistralai/Ministral-3-3B-Instruct-2512` | BF16 | Poor |
+| Agent_09 | `Agent_09 [Ministral 3 3B]` | `mistralai/Ministral-3-3B-Instruct-2512` | FP8 | Poor |
 | Agent_10 | `Agent_10 [Mistral 7B v0.3]` | `solidrust/Mistral-7B-Instruct-v0.3-AWQ` | AWQ 4-bit | Poor |
 | Agent_11 | `Agent_11 [LLaMA 3.2 3B]` | `casperhansen/llama-3.2-3b-instruct-awq` | AWQ 4-bit | Poor |
 
