@@ -131,11 +131,19 @@ DELAYED_REVEAL_TARGET_MODE = "real_family_and_size"  # What identity is revealed
 # --- 3. SIMULATION STRUCTURE ---
 NUM_DEBATE_ROUNDS = 11         # Number of full (statement -> reveal -> revote) debate cycles
 TEMPERATURE = 0.0              # Sampling temperature for LLM responses (greedy - removes resampling noise from vote/flip measurements)
-RETRY_TEMPERATURE = 0.7        # Temperature used ONLY on retry-after-parse-failure attempts in
-                               # _generate_for_all_agents. At TEMPERATURE=0 every attempt would be
-                               # byte-identical, so a malformed response would never recover via
-                               # retry - this applies only to the fresh-sample recovery path, never
-                               # to the first (official, recorded) attempt.
+RETRY_TEMPERATURE = 0.0        # Temperature used on retry-after-parse-failure attempts in
+                               # _generate_for_all_agents. Deliberately kept at 0 (not resampled
+                               # at a higher temperature) for strict determinism across every
+                               # attempt, not just the first. The real consequence: since greedy
+                               # decoding is deterministic given identical input, a retry at the
+                               # same temperature on the same prompt will almost always reproduce
+                               # the identical failure rather than recovering - the existing
+                               # fallback paths (auto-decline, rationale-only placeholder) are the
+                               # actual safety net for this failure mode now, not the retry itself.
+                               # (vLLM's continuous batching can occasionally perturb greedy output
+                               # by a token via floating-point batching effects, so a retry is not
+                               # strictly guaranteed to be byte-identical in practice - but this
+                               # should not be relied on as a recovery mechanism.)
 # Confirmed via repeated real 400 errors on this exact deployment: debate-stage
 # prompts (round 1) consistently land around ~3185 input tokens regardless of
 # identity condition - the dominant size driver is the LLM-generated rationale
@@ -165,6 +173,14 @@ MAX_MODEL_LEN = 32768
 # to avoid.
 CONTEXT_CHARS_PER_TOKEN = 3.2
 CONTEXT_SAFETY_MARGIN_TOKENS = 200   # headroom against the estimate being wrong
+# Conservative fixed estimate of everything in a debate-round prompt OTHER than
+# the shared history string itself (system prompt, self-identity block, roster
+# table or pointer note, question/options, the current votes+rationale table,
+# and task instructions) - sized generously against the heaviest stage
+# (revote, which includes the votes+rationale table on top of the history).
+# Used by _uniform_trim_shared_history so the trim decision doesn't need to
+# render each stage's exact template.
+SHARED_HISTORY_OVERHEAD_CHARS = 9000
 MODEL_GUESS_MAX_TOKENS = 6000   # The anonymous-condition guess-the-model stage needs one
                                 # guess+rationale per OTHER agent (10 entries, not 11 - an
                                 # agent never guesses itself) in a single response, not a
@@ -314,6 +330,50 @@ class LLMBackend:
         if new_prompt == user_prompt:
             return None
         return new_prompt
+
+    def _uniform_trim_shared_history(self, history_text: str, max_tokens: int = MAX_TOKENS) -> str:
+        """
+        Decides ONE trim level for a debate-history string that gets embedded
+        identically into every agent's prompt this round/step, rather than
+        letting each agent's own HTTP call decide independently.
+
+        Why this matters beyond just avoiding failures: context overflow in
+        production hits ONLY Agent_10 (Mistral), whose tokenizer is less
+        efficient on this shared text than the other 10 agents'. Trimming
+        only Mistral's own copy (which is what a per-agent check would do)
+        would leave it reasoning over strictly LESS debate history than every
+        other agent sees for the identical round - an unfair, confounding
+        asymmetry for any Mistral-specific or family-level analysis, not
+        merely a context-length workaround. This function trims the shared
+        string ONCE, so whatever the outcome, every agent (including the 10
+        that didn't personally need it) sees the exact same history.
+
+        Uses a deliberately generous fixed overhead estimate
+        (SHARED_HISTORY_OVERHEAD_CHARS) for everything else in the prompt
+        rather than rendering each stage's real template, so the same trim
+        level is valid regardless of which stage (statement/reply/revote)
+        ends up using the result.
+        """
+        estimated_tokens = (SHARED_HISTORY_OVERHEAD_CHARS + len(history_text)) / CONTEXT_CHARS_PER_TOKEN
+        budget = MAX_MODEL_LEN - max_tokens - CONTEXT_SAFETY_MARGIN_TOKENS
+        if estimated_tokens <= budget:
+            return history_text
+        trimmed = history_text
+        for drop_count in (2, 4, 8, 16, 32):
+            candidate = self._drop_earliest_round_blocks(trimmed, drop_count)
+            if candidate is None:
+                break
+            trimmed = candidate
+            new_estimate = (SHARED_HISTORY_OVERHEAD_CHARS + len(trimmed)) / CONTEXT_CHARS_PER_TOKEN
+            if new_estimate <= budget:
+                break
+        if trimmed != history_text:
+            logger.warning(
+                f"[uniform trim] shared debate history estimated at ~{estimated_tokens:.0f} tokens "
+                f"(budget {budget}); dropped early round-block(s) for ALL agents uniformly, so no "
+                f"agent sees more history than another this round."
+            )
+        return trimmed
 
     def _openai_compatible_api_generate(
         self,
@@ -1888,6 +1948,11 @@ class SimulationRunner:
         statement_roster_note = "(see the current-state table below for every participant's ID and identity.)"
         pre_debate_table = self._current_votes_and_rationale_table(active_mode)
         prior_debate_history = self._debate_history_block(round_num - 1)
+        # Uniform trim (see _uniform_trim_shared_history) - applied once here so
+        # both the statement phase (step 1) and reply phase (step 2) below, which
+        # both reference this same variable, see the identical (possibly trimmed)
+        # history.
+        prior_debate_history = self._uniform_trim_shared_history(prior_debate_history)
 
         if (self.delayed_reveal or self.identity_mode == "delayed_reveal") and stage_index == self.delayed_reveal_stage:
             reveal_msg = f"Public identities for all participants in the assembly are now revealed ({active_mode})."
@@ -2032,6 +2097,12 @@ class SimulationRunner:
             current_round_block if prior_debate_history.startswith("(No prior debate rounds")
             else f"{prior_debate_history}\n\n{current_round_block}"
         )
+        # Uniform trim again here: this is a DIFFERENT (longer) string than
+        # prior_debate_history above (it adds this round's own just-generated
+        # statements/replies), used only by the revote phase (step 3) below -
+        # same reasoning as above, applied to whichever string is actually
+        # being sent to every agent.
+        full_debate_history = self._uniform_trim_shared_history(full_debate_history)
 
         current_votes_table = self._current_votes_and_rationale_table(active_mode)   # state BEFORE this round's revote
 

@@ -195,17 +195,30 @@ Produces `results/analysis_output/curtain_analysis.xlsx` with one sheet per anal
 
 ## Reproducibility notes
 
-- All first attempts use temperature 0 (greedy decoding) to eliminate sampling noise.
-- Parse/validation failures trigger up to two retries at temperature 0.7 (a fresh sample is the
-  only way a malformed response can ever recover at this stage); every retry is logged.
-- Before sending any request, the prompt's size is estimated (a conservative 3.2 chars/token) and,
-  if it's likely to exceed the context window, the earliest debate-history round-block(s) are
-  proactively dropped **before** the request is sent — this avoids both the failure and the wasted
-  failed-request round-trip that a purely reactive retry would cost. A reactive fallback (drop and
-  resend after an actual context-length error) still exists as a safety net. **Both the proactive
-  and reactive context-trimming paths always use temperature 0**, regardless of what temperature
-  the call was originally made at — this is a content change (less history shown), not a
-  resampling recovery, so there's no reason to introduce sampling noise here.
+- **Every** attempt, including retries, uses temperature 0 (greedy decoding) — there is no
+  resampling anywhere in the pipeline. The real consequence: since greedy decoding is deterministic
+  given identical input, a parse/validation-failure retry on the same prompt will almost always
+  reproduce the identical failure rather than recovering via a fresh sample. The existing fallback
+  paths (auto-decline, rationale-only placeholder) are the actual safety net for this failure mode,
+  not the retry itself. (vLLM's continuous batching can occasionally perturb greedy output by a
+  token via floating-point batching effects, so a retry isn't strictly guaranteed to be
+  byte-identical in practice — but this isn't something to rely on for recovery.) Every retry is
+  still logged regardless of whether it changes anything.
+- Debate-history trimming for context-length is **uniform across all 11 agents**, not per-agent.
+  Context overflow in production hits only Agent_10 (Mistral), whose tokenizer is less efficient on
+  the shared debate text than the other 10 agents'. Trimming only Mistral's own prompt would leave
+  it reasoning over strictly less history than every other agent sees for the identical round — an
+  unfair, confounding asymmetry for any Mistral-specific or family-level analysis, not merely a
+  context-length workaround. Instead, the shared history string itself (used identically by all 11
+  agents' prompts that round) is checked once, conservatively, before any agent's prompt is built;
+  if it's likely to overflow, the earliest debate-history round-block(s) are dropped from that one
+  shared string, so every agent — including the 10 that didn't personally need it — sees the exact
+  same (possibly shorter) history. A per-agent proactive/reactive check still exists underneath as
+  a last-resort safety net in the rare case the shared estimate was still insufficient for one
+  agent's actual tokenizer, but this should fire far less often now that trimming happens uniformly
+  and up front. Both the uniform and per-agent trimming paths always use temperature 0, regardless
+  of what temperature the call was originally made at — this is a content change (less history
+  shown), not a resampling recovery.
 - System prompts fold the system message into the user turn (some chat templates reject a separate system role).
 - The `MAX_TOKENS` budget for agent responses is 300 tokens.
 - vLLM servers use a 32,768-token context window (`MAX_MODEL_LEN` in both `launch_servers.sh` and
