@@ -196,7 +196,17 @@ Produces `results/analysis_output/curtain_analysis.xlsx` with one sheet per anal
 ## Reproducibility notes
 
 - All first attempts use temperature 0 (greedy decoding) to eliminate sampling noise.
-- Parse failures trigger up to two retries at temperature 0.7; every retry is logged.
+- Parse/validation failures trigger up to two retries at temperature 0.7 (a fresh sample is the
+  only way a malformed response can ever recover at this stage); every retry is logged.
+- Before sending any request, the prompt's size is estimated (a conservative 3.2 chars/token) and,
+  if it's likely to exceed the context window, the earliest debate-history round-block(s) are
+  proactively dropped **before** the request is sent — this avoids both the failure and the wasted
+  failed-request round-trip that a purely reactive retry would cost. A reactive fallback (drop and
+  resend after an actual context-length error) still exists as a safety net. **Both the proactive
+  and reactive context-trimming paths always use temperature 0**, regardless of what temperature
+  the call was originally made at — this is a content change (less history shown), not a
+  resampling recovery, so there's no reason to introduce sampling noise here.
 - System prompts fold the system message into the user turn (some chat templates reject a separate system role).
 - The `MAX_TOKENS` budget for agent responses is 300 tokens.
-- vLLM servers use a 32,768-token context window.
+- vLLM servers use a 32,768-token context window (`MAX_MODEL_LEN` in both `launch_servers.sh` and
+  `run_experiment.py` — keep both in sync if this ever changes).

@@ -148,6 +148,23 @@ RETRY_TEMPERATURE = 0.7        # Temperature used ONLY on retry-after-parse-fail
 # model itself is allowed to generate per call), unrelated to how large the
 # INPUT context has grown - raising it doesn't need to track MAX_MODEL_LEN.
 MAX_TOKENS = 300               # Maximum tokens for LLM generation
+
+# Mirrors launch_servers.sh's --max-model-len - MUST be kept in sync with it.
+# Used only for the proactive context-budget check below, not for anything
+# serving-related.
+MAX_MODEL_LEN = 32768
+# Conservative chars-per-token estimate for the proactive pre-trim check below.
+# Confirmed in production: Agent_10 (Mistral-7B-v0.3)'s tokenizer is the least
+# efficient in the roster on this shared English debate text - plain English
+# prose commonly runs ~4 chars/token, but this deliberately uses a pessimistic
+# 3.2 so the proactive check trims BEFORE Agent_10 would actually overflow,
+# not just for agents with more efficient tokenizers. Being overly conservative
+# here only costs a slightly earlier trim (a few hundred tokens of old debate
+# history Agent_10 would've had to drop anyway); underestimating costs a wasted
+# failed request + reactive retry round-trip, which is the thing this exists
+# to avoid.
+CONTEXT_CHARS_PER_TOKEN = 3.2
+CONTEXT_SAFETY_MARGIN_TOKENS = 200   # headroom against the estimate being wrong
 MODEL_GUESS_MAX_TOKENS = 6000   # The anonymous-condition guess-the-model stage needs one
                                 # guess+rationale per OTHER agent (10 entries, not 11 - an
                                 # agent never guesses itself) in a single response, not a
@@ -281,6 +298,23 @@ class LLMBackend:
                 f"substitute mock data for it."
             )
 
+    @staticmethod
+    def _drop_earliest_round_blocks(user_prompt: str, drop_count: int) -> Optional[str]:
+        """
+        Drops the earliest `drop_count` "#### Round N statements:" blocks from a
+        debate-history-bearing prompt. Returns None if there are no round-blocks
+        to drop (e.g. the baseline vote, which has no history at all) or if
+        dropping this many would not change anything further.
+        """
+        parts = re.split(r'(?=#### Round \d+ statements:)', user_prompt)
+        if len(parts) <= 1:
+            return None
+        keep_from = min(drop_count, len(parts) - 1)
+        new_prompt = parts[0] + "".join(parts[1 + keep_from:])
+        if new_prompt == user_prompt:
+            return None
+        return new_prompt
+
     def _openai_compatible_api_generate(
         self,
         agent: AgentMetadata,
@@ -308,6 +342,42 @@ class LLMBackend:
             headers["HTTP-Referer"] = "https://github.com/google-deepmind/democratic-llms"
             headers["X-Title"] = "Democratic Multi-Agent Deliberation Experiment"
 
+        # PROACTIVE context-budget check: estimate whether this prompt is likely
+        # to overflow MAX_MODEL_LEN before ever sending it, and pre-trim if so.
+        # This exists purely to avoid the reactive path below's wasted
+        # failed-request + retry round-trip (every avoided overflow saves one
+        # full failed generation's wall-clock time, not just a failure count).
+        # The reactive path remains below as a safety net in case this estimate
+        # is wrong in either direction.
+        #
+        # Forcing temperature=0.0 for any trimmed call (proactive or reactive)
+        # is deliberate: this is a context-content change, not a resampling
+        # recovery - there is no reason to introduce sampling noise here, and
+        # doing so would undermine the greedy-decoding guarantee for the one
+        # agent (Mistral, the only one whose tokenizer is inefficient enough to
+        # ever reach this path) more often than any other agent in the roster.
+        was_proactively_trimmed = False
+        estimated_tokens = (len(system_prompt) + len(user_prompt)) / CONTEXT_CHARS_PER_TOKEN
+        budget = MAX_MODEL_LEN - max_tokens - CONTEXT_SAFETY_MARGIN_TOKENS
+        if estimated_tokens > budget:
+            trimmed = user_prompt
+            for drop_count in (2, 4, 8, 16, 32):
+                candidate = self._drop_earliest_round_blocks(trimmed, drop_count)
+                if candidate is None:
+                    break
+                trimmed = candidate
+                was_proactively_trimmed = True
+                new_estimate = (len(system_prompt) + len(trimmed)) / CONTEXT_CHARS_PER_TOKEN
+                if new_estimate <= budget:
+                    break
+            if was_proactively_trimmed:
+                logger.warning(
+                    f"[{agent.agent_id}] prompt estimated at ~{estimated_tokens:.0f} tokens "
+                    f"(budget {budget}); proactively dropped early debate-history round-block(s) "
+                    f"before sending, at temperature 0.0."
+                )
+                user_prompt = trimmed
+
         # Some chat templates in this roster (Gemma's, confirmed via a real 400
         # "System role not supported" error on this exact deployment) reject a
         # separate system-role message outright. Folding it into the user turn
@@ -318,7 +388,7 @@ class LLMBackend:
             "messages": [
                 {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
             ],
-            "temperature": temperature,
+            "temperature": 0.0 if was_proactively_trimmed else temperature,
             "max_tokens": max_tokens
         }
 
@@ -379,15 +449,14 @@ class LLMBackend:
             if e.code == 400 and "maximum context length" in body:
                 truncated_prompt = user_prompt
                 for drop_count in (2, 4, 8, 16, 32):
-                    parts = re.split(r'(?=#### Round \d+ statements:)', truncated_prompt)
-                    if len(parts) <= 1:
-                        break  # no round-blocks left (or none present) to drop
-                    keep_from = min(drop_count, len(parts) - 1)
-                    new_prompt = parts[0] + "".join(parts[1 + keep_from:])
-                    if new_prompt == truncated_prompt:
-                        break  # dropping more wouldn't change anything further
-                    truncated_prompt = new_prompt
+                    candidate = self._drop_earliest_round_blocks(truncated_prompt, drop_count)
+                    if candidate is None:
+                        break  # no round-blocks left (or none present) to drop, or no further change
+                    truncated_prompt = candidate
+                    # Forced to 0.0 regardless of the original `temperature` argument -
+                    # see the proactive check above for why.
                     retry_payload = dict(payload)
+                    retry_payload["temperature"] = 0.0
                     retry_payload["messages"] = [
                         {"role": "user", "content": f"{system_prompt}\n\n{truncated_prompt}"}
                     ]
