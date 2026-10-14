@@ -159,7 +159,9 @@ Each deliberation produces three files per question per condition:
     "pid", "dataset", "category", "identity_condition",
     "disclosure_type", "total_debate_rounds", "timestamp",
     "agent_roster": [{ "agent_id", "model_name", "family", "size" }],
-    "retry_log"
+    "retry_log",
+    "uniform_trim_log": "one entry per time the shared debate-history string was trimmed for ALL agents (round, how many round-blocks dropped, estimated tokens before/after)",
+    "per_agent_trim_log": "one entry per time the per-agent safety-net (proactive or reactive) fired on top of the uniform trim - expected to be rare; a non-empty list here means one specific agent still needed more trimming than the rest got"
   },
   "group_chat_transcript": [ ... ],
   "stages_detail": [

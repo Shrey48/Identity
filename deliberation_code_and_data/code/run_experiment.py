@@ -315,12 +315,14 @@ class LLMBackend:
             )
 
     @staticmethod
-    def _drop_earliest_round_blocks(user_prompt: str, drop_count: int) -> Optional[str]:
+    def _drop_earliest_round_blocks(user_prompt: str, drop_count: int) -> Optional[Tuple[str, int]]:
         """
         Drops the earliest `drop_count` "#### Round N statements:" blocks from a
         debate-history-bearing prompt. Returns None if there are no round-blocks
         to drop (e.g. the baseline vote, which has no history at all) or if
-        dropping this many would not change anything further.
+        dropping this many would not change anything further. Otherwise returns
+        (new_prompt, actual_blocks_dropped) - actual_blocks_dropped may be less
+        than drop_count if fewer round-blocks existed than requested.
         """
         parts = re.split(r'(?=#### Round \d+ statements:)', user_prompt)
         if len(parts) <= 1:
@@ -329,9 +331,23 @@ class LLMBackend:
         new_prompt = parts[0] + "".join(parts[1 + keep_from:])
         if new_prompt == user_prompt:
             return None
-        return new_prompt
+        return new_prompt, keep_from
 
-    def _uniform_trim_shared_history(self, history_text: str, max_tokens: int = MAX_TOKENS) -> str:
+    def _record_trim_event(self, log_attr: str, entry: Dict[str, Any]) -> None:
+        """
+        Generic event-log recorder, same lazy-init pattern as _retry_log: the
+        named list is created on first use and registered into
+        conversation_logger.metadata, so it's saved with every JSON write and
+        can be aggregated across a sweep afterward (e.g. "how many questions
+        needed a uniform trim", "how many times did the per-agent fallback
+        still fire on top of it").
+        """
+        if not hasattr(self, log_attr):
+            setattr(self, log_attr, [])
+            self.conversation_logger.metadata[log_attr] = getattr(self, log_attr)
+        getattr(self, log_attr).append(entry)
+
+    def _uniform_trim_shared_history(self, history_text: str, max_tokens: int = MAX_TOKENS, label: str = "") -> str:
         """
         Decides ONE trim level for a debate-history string that gets embedded
         identically into every agent's prompt this round/step, rather than
@@ -359,20 +375,30 @@ class LLMBackend:
         if estimated_tokens <= budget:
             return history_text
         trimmed = history_text
+        blocks_dropped = 0
         for drop_count in (2, 4, 8, 16, 32):
-            candidate = self._drop_earliest_round_blocks(trimmed, drop_count)
-            if candidate is None:
+            result = self._drop_earliest_round_blocks(trimmed, drop_count)
+            if result is None:
                 break
-            trimmed = candidate
+            trimmed, blocks_dropped = result
             new_estimate = (SHARED_HISTORY_OVERHEAD_CHARS + len(trimmed)) / CONTEXT_CHARS_PER_TOKEN
             if new_estimate <= budget:
                 break
         if trimmed != history_text:
             logger.warning(
-                f"[uniform trim] shared debate history estimated at ~{estimated_tokens:.0f} tokens "
-                f"(budget {budget}); dropped early round-block(s) for ALL agents uniformly, so no "
-                f"agent sees more history than another this round."
+                f"[uniform trim] {label + ': ' if label else ''}shared debate history estimated at "
+                f"~{estimated_tokens:.0f} tokens (budget {budget}); dropped early round-block(s) for "
+                f"ALL agents uniformly, so no agent sees more history than another this round."
             )
+            self._record_trim_event("uniform_trim_log", {
+                "label": label,
+                "round_blocks_dropped": blocks_dropped,
+                "estimated_tokens_before": round(estimated_tokens),
+                "estimated_tokens_after": round(new_estimate),
+                "budget": budget,
+                "chars_before": len(history_text),
+                "chars_after": len(trimmed),
+            })
         return trimmed
 
     def _openai_compatible_api_generate(
@@ -421,11 +447,12 @@ class LLMBackend:
         budget = MAX_MODEL_LEN - max_tokens - CONTEXT_SAFETY_MARGIN_TOKENS
         if estimated_tokens > budget:
             trimmed = user_prompt
+            blocks_dropped = 0
             for drop_count in (2, 4, 8, 16, 32):
-                candidate = self._drop_earliest_round_blocks(trimmed, drop_count)
-                if candidate is None:
+                result = self._drop_earliest_round_blocks(trimmed, drop_count)
+                if result is None:
                     break
-                trimmed = candidate
+                trimmed, blocks_dropped = result
                 was_proactively_trimmed = True
                 new_estimate = (len(system_prompt) + len(trimmed)) / CONTEXT_CHARS_PER_TOKEN
                 if new_estimate <= budget:
@@ -436,6 +463,11 @@ class LLMBackend:
                     f"(budget {budget}); proactively dropped early debate-history round-block(s) "
                     f"before sending, at temperature 0.0."
                 )
+                self._record_trim_event("per_agent_trim_log", {
+                    "agent_id": agent.agent_id, "mechanism": "proactive",
+                    "round_blocks_dropped": blocks_dropped,
+                    "estimated_tokens_before": round(estimated_tokens), "budget": budget,
+                })
                 user_prompt = trimmed
 
         # Some chat templates in this roster (Gemma's, confirmed via a real 400
@@ -509,10 +541,10 @@ class LLMBackend:
             if e.code == 400 and "maximum context length" in body:
                 truncated_prompt = user_prompt
                 for drop_count in (2, 4, 8, 16, 32):
-                    candidate = self._drop_earliest_round_blocks(truncated_prompt, drop_count)
-                    if candidate is None:
+                    result = self._drop_earliest_round_blocks(truncated_prompt, drop_count)
+                    if result is None:
                         break  # no round-blocks left (or none present) to drop, or no further change
-                    truncated_prompt = candidate
+                    truncated_prompt, blocks_dropped = result
                     # Forced to 0.0 regardless of the original `temperature` argument -
                     # see the proactive check above for why.
                     retry_payload = dict(payload)
@@ -531,9 +563,13 @@ class LLMBackend:
                             data2 = json.loads(resp2.read().decode("utf-8"))
                             logger.warning(
                                 f"[{agent.agent_id}] prompt exceeded context length "
-                                f"({body[:200]!r}); retried with the earliest {keep_from} "
+                                f"({body[:200]!r}); retried with the earliest {blocks_dropped} "
                                 f"debate-history round-block(s) dropped and succeeded."
                             )
+                            self._record_trim_event("per_agent_trim_log", {
+                                "agent_id": agent.agent_id, "mechanism": "reactive",
+                                "round_blocks_dropped": blocks_dropped,
+                            })
                             return data2["choices"][0]["message"]["content"]
                     except urllib.error.HTTPError as e2:
                         try:
@@ -1952,7 +1988,8 @@ class SimulationRunner:
         # both the statement phase (step 1) and reply phase (step 2) below, which
         # both reference this same variable, see the identical (possibly trimmed)
         # history.
-        prior_debate_history = self._uniform_trim_shared_history(prior_debate_history)
+        prior_debate_history = self._uniform_trim_shared_history(
+            prior_debate_history, label=f"round {round_num}, prior_debate_history (steps 1-2)")
 
         if (self.delayed_reveal or self.identity_mode == "delayed_reveal") and stage_index == self.delayed_reveal_stage:
             reveal_msg = f"Public identities for all participants in the assembly are now revealed ({active_mode})."
@@ -2102,7 +2139,8 @@ class SimulationRunner:
         # statements/replies), used only by the revote phase (step 3) below -
         # same reasoning as above, applied to whichever string is actually
         # being sent to every agent.
-        full_debate_history = self._uniform_trim_shared_history(full_debate_history)
+        full_debate_history = self._uniform_trim_shared_history(
+            full_debate_history, label=f"round {round_num}, full_debate_history (step 3)")
 
         current_votes_table = self._current_votes_and_rationale_table(active_mode)   # state BEFORE this round's revote
 
