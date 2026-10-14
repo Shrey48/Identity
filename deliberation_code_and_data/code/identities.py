@@ -10,7 +10,7 @@ Supports all identity conditions:
 6. 'delayed_reveal' (Reveals identity at a specific stage index)
 7. 'gender_reveal' (Agent's real system name + assigned gender only - no model
    family/size, no persona name/age/ethnicity. Reuses the same gender field as
-   the virtual-persona pool: Male=5, Female=4, Transgender=2 across the 11 agents.)
+   the virtual-persona pool: Male=4, Female=4, Transgender=3 across the 11 agents.)
 8. 'real_full_identity' (Agent's real model name, version, and parameter size -
    e.g. "Qwen 2.5 3B", "Gemma 3 1B", "LLaMA 3.1 70B", "Mistral 7B v0.3" - the
    complete real identity, not just family or just size.)
@@ -46,22 +46,29 @@ class AgentMetadata:
 # ==============================================================================
 # PERSONA POOL DESIGN NOTE
 # ==============================================================================
-# This 12-slot demographic composition is derived from real population data:
+# This 11-slot demographic composition is derived from real population data:
 #   - Age structure: UN World Population Prospects 2024 (~25% child / ~65% adult / ~10% old)
 #   - Ethnicity split: regional population shares (Our World in Data / country populations),
 #     approximated across a 7-category ethnic taxonomy (no single authoritative global
 #     "population by ethnicity" dataset exists, so this is a documented best-effort proxy)
-#   - Gender is the one deliberate exception: 6 male / 4 female / 2 transgender was chosen
+#   - Gender is the one deliberate exception: 4 male / 4 female / 3 transgender was chosen
 #     by explicit override rather than the real-world ratio, so the transgender condition
 #     has enough representation in the roster to produce any data at all.
 #
+# Exactly 11 entries (one per agent) - there is no 12th/unused slot. An earlier
+# version of this pool had 12 entries with only the first 11 ever assigned (the
+# roster is built by iterating the 11 DEFAULT_11_AGENTS_SPECS entries), silently
+# leaving one persona dead and making the real used gender split (5M/4F/2T)
+# different from what the file's own comment claimed (6M/4F/2T). Trimmed to 11
+# so the stated and actual distributions are the same thing.
+#
 # Final counts used below:
-#   Gender:     Male=6, Female=4, Transgender=2
-#   Age bucket: child=3, adult=7, old=2
-#   Ethnicity:  South Asian=3, East Asian=3, Black/African=2, White/Caucasian=1,
+#   Gender:     Male=4, Female=4, Transgender=3
+#   Age bucket: child=3, adult=7, old=1
+#   Ethnicity:  South Asian=3, East Asian=3, Black/African=1, White/Caucasian=1,
 #               Hispanic/Latino=1, Middle Eastern=1, Eastern European=1
 #
-# The 12 rows are laid out so no single demographic combination (e.g. all children
+# The rows are laid out so no single demographic combination (e.g. all children
 # sharing one gender, or all "old" personas sharing one ethnicity) accidentally
 # confounds one axis with another within a single roster.
 # ==============================================================================
@@ -75,9 +82,8 @@ _PERSONA_BASE: List[Dict[str, Any]] = [
     {"gender": "Female",      "age": 38, "age_bucket": "adult", "ethnicity": "Hispanic / Latino",  "real_name": "Sofia Alvarez",   "profession": "Environmental Advocate"},
     {"gender": "Male",        "age": 45, "age_bucket": "adult", "ethnicity": "Middle Eastern",     "real_name": "Karim Haddad",    "profession": "Human Rights Lawyer"},
     {"gender": "Transgender", "age": 51, "age_bucket": "adult", "ethnicity": "Eastern European",   "real_name": "Alex Petrov",     "profession": "Community Organizer"},
-    {"gender": "Male",        "age": 58, "age_bucket": "adult", "ethnicity": "South Asian",        "real_name": "Rajesh Kumar",    "profession": "Healthcare Policy Advisor"},
+    {"gender": "Transgender", "age": 58, "age_bucket": "adult", "ethnicity": "South Asian",        "real_name": "Kiran Kapoor",    "profession": "Healthcare Policy Advisor"},
     {"gender": "Female",      "age": 78, "age_bucket": "old",   "ethnicity": "East Asian",         "real_name": "Yuki Sato",       "profession": "Retired Judge"},
-    {"gender": "Male",        "age": 96, "age_bucket": "old",   "ethnicity": "Black / African",    "real_name": "Elijah Mensah",   "profession": "Retired Professor"},
 ]
 
 FULL_PERSONA_COMBO = "name_gender_age_ethnicity"
